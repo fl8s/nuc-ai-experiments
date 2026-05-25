@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrStart" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 10 0 L 0 5 L 10 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrExt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="620" fill="#0f1117"/>
+
+  <!-- title -->
+  <text x="600" y="44" text-anchor="middle" font-size="20" font-weight="700" fill="#f1f5f9">Virtual Scott</text>
+  <text x="600" y="68" text-anchor="middle" font-size="12" fill="#94a3b8">An autonomous WordPress comment replier — all inference runs on the NUC.</text>
+
+  <!-- ============== NUC host frame ============== -->
+  <rect x="30" y="96" width="1140" height="404" rx="14" fill="#131722" stroke="#64748b" stroke-width="2" stroke-dasharray="8 4"/>
+  <text x="52" y="122" font-size="11" font-weight="700" fill="#94a3b8" letter-spacing="3">INTEL NUC · PANTHER LAKE</text>
+
+  <!-- ============== Proxmox VM ============== -->
+  <rect x="60" y="140" width="620" height="344" rx="12" fill="#1a1832" stroke="#a78bfa" stroke-width="2.5"/>
+  <text x="370" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#a78bfa" letter-spacing="2">PROXMOX VM · ub2404-openclaw</text>
+  <text x="370" y="190" text-anchor="middle" font-size="11" fill="#a78bfa" opacity="0.75">k3s pods · systemd daemons</text>
+
+  <!-- WordPress card -->
+  <g>
+    <rect x="90" y="212" width="560" height="98" rx="8" fill="#0f1828" stroke="#60a5fa" stroke-width="2"/>
+    <text x="370" y="244" text-anchor="middle" font-size="14" font-weight="700" fill="#f1f5f9">WordPress  +  MariaDB</text>
+    <text x="370" y="266" text-anchor="middle" font-size="11" fill="#94a3b8">k3s pods · sandbox blog with synthetic comments</text>
+    <text x="370" y="288" text-anchor="middle" font-size="11" fill="#94a3b8">replies posted as the <tspan font-style="italic" fill="#e2e8f0">virtual-scott</tspan> editor account</text>
+  </g>
+
+  <!-- OpenClaw daemon card -->
+  <g>
+    <rect x="90" y="338" width="560" height="124" rx="10" fill="#1f160a" stroke="#fbbf24" stroke-width="2.5"/>
+    <text x="370" y="372" text-anchor="middle" font-size="14" font-weight="700" fill="#fbbf24" letter-spacing="2">OPENCLAW DAEMON</text>
+    <text x="370" y="398" text-anchor="middle" font-size="12" fill="#f1f5f9">hosts the <tspan font-style="italic">virtual-scott</tspan> agent</text>
+    <text x="370" y="420" text-anchor="middle" font-size="11" fill="#94a3b8">polls for new comments, drafts a reply, posts it back</text>
+    <text x="370" y="440" text-anchor="middle" font-size="11" fill="#94a3b8">cron-driven every five minutes</text>
+  </g>
+
+  <!-- ============== LXC container ============== -->
+  <rect x="710" y="140" width="460" height="344" rx="12" fill="#0a2025" stroke="#22d3ee" stroke-width="2.5"/>
+  <text x="940" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#22d3ee" letter-spacing="2">LXC CONTAINER</text>
+  <text x="940" y="190" text-anchor="middle" font-size="11" fill="#22d3ee" opacity="0.75">k3s pod runtime · iGPU passthrough</text>
+
+  <!-- code-assistant pod card -->
+  <g>
+    <rect x="740" y="212" width="400" height="250" rx="10" fill="#1a1d26" stroke="#475569" stroke-width="1.5"/>
+    <text x="940" y="240" text-anchor="middle" font-size="13" font-weight="700" fill="#f1f5f9">code-assistant  ·  k3s pod</text>
+    <text x="940" y="258" text-anchor="middle" font-size="11" fill="#94a3b8">OpenAI-compatible /v3 endpoint</text>
+
+    <!-- OVMS layer -->
+    <g>
+      <rect x="760" y="282" width="360" height="60" rx="6" fill="#0f1828" stroke="#60a5fa" stroke-width="1.5"/>
+      <text x="940" y="306" text-anchor="middle" font-size="13" font-weight="600" fill="#f1f5f9">OpenVINO Model Server</text>
+      <text x="940" y="324" text-anchor="middle" font-size="11" fill="#94a3b8">tool-parser: qwen3coder · chat-completions API</text>
+    </g>
+
+    <!-- Qwen card -->
+    <g>
+      <rect x="760" y="358" width="360" height="88" rx="6" fill="#0a1f15" stroke="#34d399" stroke-width="2.5"/>
+      <text x="940" y="385" text-anchor="middle" font-size="15" font-weight="700" fill="#f1f5f9">Qwen3-Coder-30B-A3B</text>
+      <text x="940" y="405" text-anchor="middle" font-size="11" fill="#94a3b8">INT4 · OpenVINO IR · MoE (3B active)</text>
+      <text x="940" y="427" text-anchor="middle" font-size="11" fill="#34d399" font-weight="600" letter-spacing="2">served on iGPU</text>
+    </g>
+  </g>
+
+  <!-- ============== Cross-link arrows inside NUC ============== -->
+  <!-- OpenClaw <-> WordPress (poll + POST, bidirectional) -->
+  <line x1="370" y1="337" x2="370" y2="311" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arrStart)"/>
+  <rect x="395" y="312" width="170" height="22" rx="4" fill="#0f1117" stroke="#475569" stroke-width="1"/>
+  <text x="480" y="327" text-anchor="middle" font-size="11" fill="#e2e8f0">poll + POST (WP REST)</text>
+
+  <!-- OpenClaw -> Qwen (HTTP inference) -->
+  <line x1="651" y1="400" x2="738" y2="400" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="654" y="368" width="80" height="22" rx="4" fill="#0f1117" stroke="#475569" stroke-width="1"/>
+  <text x="694" y="383" text-anchor="middle" font-size="11" fill="#e2e8f0">draft reply</text>
+  <text x="694" y="418" text-anchor="middle" font-size="10" fill="#94a3b8" font-style="italic">HTTP /v3/chat</text>
+
+  <!-- ============== External services ============== -->
+  <!-- Telegram (bottom center, outside NUC) -->
+  <g>
+    <rect x="490" y="528" width="220" height="62" rx="10" fill="#0a1a28" stroke="#38bdf8" stroke-width="2"/>
+    <text x="600" y="554" text-anchor="middle" font-size="13" font-weight="700" fill="#38bdf8" letter-spacing="2">TELEGRAM</text>
+    <text x="600" y="574" text-anchor="middle" font-size="11" fill="#94a3b8">one buzz per landed reply</text>
+  </g>
+
+  <!-- Arrow: OpenClaw -> Telegram (exits NUC) -->
+  <path d="M 370 462 Q 370 500 530 528" fill="none" stroke="#64748b" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arrExt)"/>
+
+  <!-- ============== Legend ============== -->
+  <g transform="translate(750, 547)">
+    <rect x="0" y="0" width="12" height="12" rx="2" fill="#1a1832" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="20" y="10" font-size="10" fill="#94a3b8">Proxmox VM</text>
+    <rect x="105" y="0" width="12" height="12" rx="2" fill="#0a2025" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="125" y="10" font-size="10" fill="#94a3b8">LXC container</text>
+    <rect x="220" y="0" width="12" height="12" rx="2" fill="#0a1f15" stroke="#34d399" stroke-width="1.5"/>
+    <text x="240" y="10" font-size="10" fill="#94a3b8">runs on iGPU</text>
+    <line x1="320" y1="6" x2="360" y2="6" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="368" y="10" font-size="10" fill="#94a3b8">leaves the NUC</text>
+  </g>
+</svg>

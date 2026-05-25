@@ -1,0 +1,18 @@
+[
+  {
+    "post_slug": "agentic-coding-on-an-inexpensive-nuc-with-opencode-and-qwen3-coder-30b",
+    "content": "What other models could be used? I'd be curious what runs well on the same hardware."
+  },
+  {
+    "post_slug": "people-and-object-detection-with-automated-license-plate-recognition-on-panther-lake",
+    "content": "Are you concerned about the privacy implications of license plate detection? Especially in a residential setting where you might inadvertently capture neighbours."
+  },
+  {
+    "post_slug": "voice-interactive-ai-chatbot-on-panther-lake-core-ultra-7-series-3-nuc",
+    "content": "Does this work with anyone's voice, or are you constrained to the one TTS speaker embedding you mentioned?"
+  },
+  {
+    "post_slug": "agentic-coding-on-an-inexpensive-nuc-with-opencode-and-qwen3-coder-30b",
+    "content": "How would you go about fine-tuning a smaller coder model on a custom codebase? I have an internal monorepo and I'd love to teach a model our conventions, but I don't know where to start."
+  }
+]

@@ -1,0 +1,169 @@
+# Sandbox WordPress on k3s — plain manifest, no Helm.
+#
+# Replaces an earlier attempt to use the Bitnami WP Helm chart. As of
+# August 2025 the Bitnami public registry was gutted: only `latest` and
+# SHA-digest tags remain for bitnami/wordpress, and the `latest` tag is
+# the policy-change "limited" build whose internal wp_install crashes
+# silently. The official `wordpress` + `mariadb` Docker Hub images do
+# the same job without the third-party policy risk.
+#
+# Apply via `make install` (which also runs `wp core install` to finish
+# setup non-interactively). Exposed on NodePort 30080.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wordpress
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wordpress-db
+  namespace: wordpress
+type: Opaque
+stringData:
+  mariadb-root-password: rootpw-sandbox
+  mariadb-password: wp-db-sandbox
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-data
+  namespace: wordpress
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-data
+  namespace: wordpress
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb
+  namespace: wordpress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: mariadb}
+  template:
+    metadata:
+      labels: {app: mariadb}
+    spec:
+      containers:
+        - name: mariadb
+          image: mariadb:11
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: wordpress-db, key: mariadb-root-password}}
+            - name: MARIADB_DATABASE
+              value: wordpress
+            - name: MARIADB_USER
+              value: wordpress
+            - name: MARIADB_PASSWORD
+              valueFrom: {secretKeyRef: {name: wordpress-db, key: mariadb-password}}
+          ports:
+            - {containerPort: 3306, name: mysql}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/mysql}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: mariadb-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: wordpress
+spec:
+  selector: {app: mariadb}
+  ports:
+    - {port: 3306, targetPort: 3306}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: wordpress}
+  template:
+    metadata:
+      labels: {app: wordpress}
+    spec:
+      containers:
+        - name: wordpress
+          image: wordpress:php8.2-apache
+          env:
+            - {name: WORDPRESS_DB_HOST, value: "mariadb:3306"}
+            - {name: WORDPRESS_DB_USER, value: wordpress}
+            - {name: WORDPRESS_DB_NAME, value: wordpress}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: wordpress-db, key: mariadb-password}}
+            # Without this, wp_is_application_passwords_available() returns
+            # false on non-HTTPS hosts and ALL REST API auth via Application
+            # Passwords 401s with "rest_not_logged_in". Setting the env type
+            # to "local" tells WP to relax that check. Safe here — sandbox.
+            - {name: WP_ENVIRONMENT_TYPE, value: local}
+          ports:
+            - {containerPort: 80, name: http}
+          # TCP probe (not httpGet): WP redirects unauthenticated requests
+          # to the canonical site URL, and kubelet's httpGet probe follows
+          # the redirect — substituting the host for the pod IP while
+          # keeping the redirect's port. That lands on <pod-ip>:30080
+          # which isn't open, so the probe loops failing forever. TCP
+          # probe just checks Apache is listening.
+          readinessProbe:
+            tcpSocket: {port: 80}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          # Drop wp-cli into the container on every start, so the
+          # Makefile targets (create-virtual-scott, *-app-password,
+          # `wp core install` on first deploy) can shell out to it.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    set -e
+                    if [ ! -x /usr/local/bin/wp ]; then
+                      curl -sLo /usr/local/bin/wp \
+                        https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+                      chmod +x /usr/local/bin/wp
+                    fi
+          volumeMounts:
+            - {name: data, mountPath: /var/www/html}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: wordpress-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  type: NodePort
+  selector: {app: wordpress}
+  ports:
+    - {port: 80, targetPort: 80, nodePort: 30080, name: http}
