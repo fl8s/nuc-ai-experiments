@@ -28,12 +28,13 @@ What it does, in order:
    1), shell out to `openclaw agent` and have it run the
    `virtual-scott-reply` skill for that comment id. Each child
    invocation is a separate agent session.
-6. After each child agent run, verify the reply actually landed —
-   poll both the WP REST endpoint and the agent log on every
-   iteration (up to 6 iterations, 5s backoff). Either signal is
-   sufficient. Verification runs regardless of the agent's exit
-   code, since the agent can fail its final report step after a
-   successful POST.
+6. After each child agent run, verify the reply landed by reading
+   the signal file `runs/posted/parent-<cid>.json` that
+   `vs-post-reply.sh` writes immediately after a successful POST.
+   Falls back to a WP REST query if the signal file isn't there
+   (handles replies posted outside our helper). Verification runs
+   regardless of the agent's exit code, since the agent can fail
+   its final report step after a successful POST.
 7. Log each attempt to `runs/successes.jsonl` or
    `runs/failures.jsonl` in the workspace.
 8. Push Telegram notifications if VS_TELEGRAM_BOT_TOKEN and
@@ -196,55 +197,42 @@ def reply_via_child_agent(comment_id):
     return result.returncode, session_id, log_path
 
 
-def _scan_log_for_reply(log_path):
-    """Search the agent log for the agent's own success patterns.
-    Returns dict with id if found, else None. Cheap; safe to call
-    repeatedly inside the WP-retry loop."""
-    if not log_path or not Path(log_path).exists():
-        return None
-    try:
-        text = Path(log_path).read_text(errors="ignore")
-    except OSError:
-        return None
-    m = re.search(r"Posted comment (\d+) as a reply", text)
-    if not m:
-        m = re.search(r"#comment-(\d+)", text)
-    if m:
-        return {"id": int(m.group(1)), "link": None, "source": "agent_log_report"}
-    if "__STATUS__201" in text:
-        ids = re.findall(r'"id"\s*:\s*(\d+)', text)
-        if ids:
-            return {"id": int(ids[-1]), "link": None, "source": "agent_log_status201"}
-    return None
-
-
-def check_reply_landed(comment_id, log_path=None):
+def check_reply_landed(comment_id):
     """Did a virtual-scott reply actually land for `comment_id`?
 
-    Polls both the WP REST endpoint and the agent log on every
-    iteration (6 attempts, 5s backoff = 30s max wait). Either
-    signal is sufficient. The log scan runs first each iteration
-    because the agent's "Posted comment N as a reply" line often
-    appears in the log before WP indexes the new comment.
+    Primary signal: `runs/posted/parent-N.json`, written synchronously
+    by `vs-post-reply.sh` immediately after the WP REST POST returns
+    201. The file is on disk before the helper exits, which is before
+    the inner agent exits, which is before subprocess.run returns —
+    so by the time we check, it's there.
+
+    Fallback: WP REST query, for replies posted by something other
+    than our helper (or if the signal file was lost). Used by the
+    backfill sweeper too.
 
     Returns dict with id (and optionally link) if found, else None."""
-    url = f"{WP_BASE}/comments?parent={comment_id}&status=approve&per_page=10"
-    for attempt in range(6):
-        # Log scan first — cheap, no network, catches the case where
-        # the agent has just finished writing its final report.
-        landed = _scan_log_for_reply(log_path)
-        if landed:
-            return landed
-        # WP REST query — slower but authoritative once WP indexes.
+    signal = RUNS_DIR / "posted" / f"parent-{comment_id}.json"
+    if signal.exists():
+        data = None
         try:
-            with urlopen(Request(url), timeout=15) as resp:
-                for c in json.load(resp):
-                    if c.get("author") == 2:
-                        return {"id": c["id"], "link": c.get("link")}
-        except Exception:
+            data = json.loads(signal.read_text())
+        except (json.JSONDecodeError, OSError):
             pass
-        if attempt < 5:
-            time.sleep(5)
+        finally:
+            signal.unlink(missing_ok=True)
+        if data and "reply_id" in data:
+            return {"id": data["reply_id"], "link": data.get("link"),
+                    "source": "helper_signal"}
+
+    url = f"{WP_BASE}/comments?parent={comment_id}&status=approve&per_page=10"
+    try:
+        with urlopen(Request(url), timeout=15) as resp:
+            for c in json.load(resp):
+                if c.get("author") == 2:
+                    return {"id": c["id"], "link": c.get("link"),
+                            "source": "wp_rest"}
+    except Exception:
+        pass
     return None
 
 
@@ -434,7 +422,7 @@ def main():
             # after successfully POSTing the reply (e.g. it errors
             # during the final report step), and we still want to
             # record the reply as landed.
-            landed = check_reply_landed(cid, log_path)
+            landed = check_reply_landed(cid)
 
             if landed:
                 entry["action"] = "replied" if rc == 0 else "replied_with_agent_error"
