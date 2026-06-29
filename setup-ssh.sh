@@ -42,9 +42,12 @@ install_packages() {
                 fi
             done
             if [ ${#missing[@]} -gt 0 ]; then
-                echo "rpm-ostree detected. The following packages need to be installed:"
+                echo "rpm-ostree detected. Installing the following missing packages:"
                 echo "${missing[*]}"
-                echo "Please install them manually using 'rpm-ostree install <packages>' and reboot, or use --apply-live."
+                rpm-ostree install --idempotent --apply-live -y "${missing[@]}" || {
+                    echo "WARN: apply-live failed, falling back to standard install. A reboot may be required."
+                    rpm-ostree install --idempotent -y "${missing[@]}"
+                }
             fi
         else
             dnf install -y "${fedora_pkgs[@]}"
