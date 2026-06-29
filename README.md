@@ -116,8 +116,27 @@ convenient to SSH in as well as to SCP in files.
 
 ## Copy project files to the container
 
-Copy the `npu-chatbot` and `npu-imagegen` directories to the LXC container.
+Copy the `npu-chatbot`, `npu-imagegen`, and `code-assistant` directories to the LXC container.
 SSH, SCP, or any other method works.
+
+## code-assistant
+
+See [code-assistant/README.md](code-assistant/README.md) for details. (Includes opencode instructions in [code-assistant/opencode/README.md](code-assistant/opencode/README.md)).
+
+```bash
+cd ~/code-assistant
+
+# list models
+make models
+
+# build and deploy the coding assistant (Qwen3-Coder-30B-A3B)
+sudo make build MODEL=qwen3-coder-30b
+make deploy MODEL=qwen3-coder-30b
+
+# test the endpoint
+make smoke
+```
+
 
 ## npu-chatbot
 
