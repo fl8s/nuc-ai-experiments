@@ -1,0 +1,38 @@
+FROM quay.io/toolbx/ubuntu-toolbox:24.04
+
+# Locale — without this zsh's line editor breaks inside toolbox
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y locales curl wget software-properties-common python3 python3-pip && \
+    locale-gen en_US.UTF-8 && \
+    update-locale LANG=en_US.UTF-8 && \
+    apt-get clean
+
+ENV LANG=en_US.UTF-8
+
+# Level Zero loader — required by intel-level-zero-npu from the NPU driver bundle
+RUN add-apt-repository -y ppa:kobuk-team/intel-graphics && \
+    apt-get update && \
+    apt-get install -y libze1 && \
+    apt-get clean
+
+# Intel NPU userspace driver
+# Check https://github.com/intel/linux-npu-driver/releases for newer versions
+# The kernel-side driver (intel_vpu) is already built into the Fedora 44 kernel —
+# these packages provide only the userspace runtime OpenVINO needs.
+ARG NPU_VERSION=1.33.0
+ARG NPU_BUILD=20260529-26625960453
+RUN wget -q "https://github.com/intel/linux-npu-driver/releases/download/v${NPU_VERSION}/linux-npu-driver-v${NPU_VERSION}.${NPU_BUILD}-ubuntu2404.tar.gz" \
+        -O /tmp/npu-driver.tar.gz && \
+    mkdir -p /tmp/npu-driver && \
+    tar xzf /tmp/npu-driver.tar.gz -C /tmp/npu-driver && \
+    dpkg -i /tmp/npu-driver/*.deb && \
+    rm -rf /tmp/npu-driver /tmp/npu-driver.tar.gz
+
+# Neovim — Ubuntu 24.04 ships 0.9.x; grab the latest release binary instead
+RUN wget -q https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz \
+        -O /tmp/nvim.tar.gz && \
+    tar xzf /tmp/nvim.tar.gz -C /usr/local --strip-components=1 && \
+    rm /tmp/nvim.tar.gz
+
+# uv — fast Python package/project manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
