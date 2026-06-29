@@ -2,520 +2,487 @@
 #
 # setup-k3s-npu.sh
 #
-# Run this inside a fresh privileged LXC container on Proxmox to set up:
-#   1. System prerequisites for K3s in LXC
-#   2. K3s (lightweight Kubernetes)
-#   3. Helm
-#   4. nerdctl (container build tool for containerd/K3s)
-#   5. Node Feature Discovery (NFD)
-#   6. cert-manager
-#   7. Intel Device Plugin Operator + NPU Plugin
-#
-# Prerequisites (done on the Proxmox HOST before running this script):
-#   - LXC created with: nesting=1, fuse=1, privileged
-#   - LXC config includes: apparmor unconfined, cgroup device allow, mount auto
-#   - /dev/accel/accel0 bind-mounted into the container
-#   - udev rule on host: chmod 666 /dev/accel/accel0
-#   - See SETUP.md sections 2.2-2.5 for full host-side setup
+# Sets up K3s with Intel NPU support on Fedora 44 Silverblue (bare metal).
+# Also works in a privileged LXC container on Proxmox.
 #
 # Usage:
-#   chmod +x setup-k3s-npu.sh
-#   ./setup-k3s-npu.sh
+#   sudo ./setup-k3s-npu.sh [--dry-run] [--uninstall]
+#
+#   --dry-run    Print what would be done without making changes
+#   --uninstall  Tear down everything this script installed
+#
+# Prerequisites:
+#   - /dev/accel/accel0 must exist with 0666 permissions
+#   - Run setup-toolbox-npu.sh first (adds the required udev rules)
 #
 
 set -euo pipefail
 
-# --- Configuration ---
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 K3S_DISABLE_TRAEFIK=true
 K3S_DISABLE_SERVICELB=true
 NFD_VERSION="0.16.4"
 CERTMANAGER_VERSION="v1.15.2"
 PANTHER_LAKE_DEVICE_ID="b03e"
 HELM_TIMEOUT="120s"
-K3S_READY_TIMEOUT=120      # seconds to wait for K3s node to be Ready
-POD_READY_TIMEOUT=180      # seconds to wait for pods to be Running
-NPU_REGISTER_TIMEOUT=60    # seconds to wait for NPU to appear in allocatable
+K3S_READY_TIMEOUT=120
+POD_READY_TIMEOUT=180
+NPU_REGISTER_TIMEOUT=60
 
-# --- Colors ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# ---------------------------------------------------------------------------
+# Parse flags
+# ---------------------------------------------------------------------------
+DRY_RUN=false
+UNINSTALL=false
 
-# --- Helpers ---
-log()   { echo -e "${BLUE}[INFO]${NC} $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
+for arg in "$@"; do
+    case $arg in
+        --dry-run)   DRY_RUN=true ;;
+        --uninstall) UNINSTALL=true ;;
+        *) echo "Unknown option: $arg"; echo "Usage: $0 [--dry-run] [--uninstall]"; exit 1 ;;
+    esac
+done
 
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        fail "This script must be run as root"
+# ---------------------------------------------------------------------------
+# Calling-user detection
+# ---------------------------------------------------------------------------
+# The script must be run with sudo, but helm/kubectl/kubeconfig should
+# belong to the user who invoked sudo, not root.
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: Run with sudo: sudo $0 $*"
+    exit 1
+fi
+
+CALLING_USER="${SUDO_USER:-$USER}"
+CALLING_HOME="$(getent passwd "$CALLING_USER" | cut -d: -f6)"
+
+run_as_user() {
+    if [[ "$CALLING_USER" == "root" ]]; then
+        "$@"
+    else
+        sudo -u "$CALLING_USER" env \
+            HOME="$CALLING_HOME" \
+            PATH="$PATH" \
+            KUBECONFIG="$CALLING_HOME/.kube/config" \
+            "$@"
     fi
 }
 
-check_lxc() {
-    if [[ ! -f /proc/1/environ ]] || ! grep -q container=lxc /proc/1/environ 2>/dev/null; then
-        # Alternative check
-        if [[ ! -d /proc/1/ns ]] || systemd-detect-virt -c -q 2>/dev/null; then
-            warn "Cannot confirm this is an LXC container. Proceeding anyway..."
-        fi
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+RED='\033[0;31m';  GREEN='\033[0;32m'
+YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+
+log()  { echo -e "${BLUE}[INFO]${NC} $*"; }
+ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+fail() { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
+
+dry() {
+    # In --dry-run mode, print the command instead of running it.
+    if $DRY_RUN; then
+        echo "  [DRY RUN] $*"
+    else
+        "$@"
     fi
 }
 
-check_npu_device() {
-    if [[ ! -e /dev/accel/accel0 ]]; then
-        fail "/dev/accel/accel0 not found. Ensure NPU passthrough is configured in the LXC config on the Proxmox host. See SETUP.md section 2.3."
+dry_as_user() {
+    if $DRY_RUN; then
+        echo "  [DRY RUN] (as $CALLING_USER) $*"
+    else
+        run_as_user "$@"
     fi
-
-    if ! python3 -c "import os; os.open('/dev/accel/accel0', os.O_RDWR)" 2>/dev/null; then
-        # Try a simpler check
-        if ! cat /dev/accel/accel0 >/dev/null 2>&1; then
-            warn "/dev/accel/accel0 exists but may not be accessible. Check permissions on the Proxmox host (chmod 666 /dev/accel/accel0)."
-        fi
-    fi
-    ok "/dev/accel/accel0 is present"
 }
 
-wait_for_k3s_ready() {
-    local timeout=$1
-    local elapsed=0
-    log "Waiting up to ${timeout}s for K3s node to be Ready..."
-    while [[ $elapsed -lt $timeout ]]; do
-        if kubectl get nodes 2>/dev/null | grep -q " Ready "; then
-            ok "K3s node is Ready"
-            return 0
+# ---------------------------------------------------------------------------
+# Uninstall / teardown
+# ---------------------------------------------------------------------------
+teardown() {
+    log "Tearing down k3s and all installed components..."
+    log "Running as: root (system) + $CALLING_USER (helm/kubectl)"
+
+    # Helm releases in reverse installation order
+    for release_ns in "npu:inteldeviceplugins-system" "dp-operator:inteldeviceplugins-system" \
+                      "cert-manager:cert-manager" "nfd:node-feature-discovery"; do
+        release="${release_ns%%:*}"
+        ns="${release_ns##*:}"
+        if run_as_user helm status "$release" -n "$ns" &>/dev/null 2>&1; then
+            log "Uninstalling helm release: $release"
+            dry_as_user helm uninstall "$release" -n "$ns"
         fi
-        sleep 5
-        elapsed=$((elapsed + 5))
     done
-    fail "K3s node did not become Ready within ${timeout}s. Check: systemctl status k3s"
+
+    # cert-manager CRDs are not removed by helm uninstall
+    if run_as_user kubectl get crd 2>/dev/null | grep -q 'cert-manager.io'; then
+        log "Removing cert-manager CRDs (not cleaned up by helm)..."
+        dry_as_user bash -c \
+            "kubectl get crd | grep cert-manager.io | awk '{print \$1}' | xargs kubectl delete crd"
+    fi
+
+    # k3s ships its own uninstall script that cleans iptables, CNI, etc.
+    if [[ -f /usr/local/bin/k3s-uninstall.sh ]]; then
+        log "Running k3s uninstall script..."
+        dry /usr/local/bin/k3s-uninstall.sh
+    fi
+
+    # Remove helm binary
+    dry rm -f /usr/local/bin/helm
+
+    # Remove nerdctl binary (binary-only install, single file)
+    dry rm -f /usr/local/bin/nerdctl
+
+    # Remove the mount-rshared systemd service
+    if [[ -f /etc/systemd/system/k3s-mount-rshared.service ]]; then
+        dry systemctl disable k3s-mount-rshared.service
+        dry rm -f /etc/systemd/system/k3s-mount-rshared.service
+        dry systemctl daemon-reload
+    fi
+
+    # Remove kubeconfig
+    dry rm -f "$CALLING_HOME/.kube/config"
+
+    # Remove KUBECONFIG from /etc/environment
+    if grep -q 'KUBECONFIG' /etc/environment 2>/dev/null; then
+        dry sed -i '/^KUBECONFIG=/d' /etc/environment
+    fi
+
+    ok "Teardown complete. You may want to reboot to clear mount propagation changes."
+    exit 0
 }
 
-wait_for_pods_ready() {
-    local namespace=$1
-    local label=$2
-    local timeout=$3
-    local elapsed=0
-    log "Waiting up to ${timeout}s for pods (${label}) in ${namespace}..."
-    while [[ $elapsed -lt $timeout ]]; do
-        local total running
-        total=$(kubectl get pods -n "$namespace" -l "$label" --no-headers 2>/dev/null | wc -l)
-        running=$(kubectl get pods -n "$namespace" -l "$label" --no-headers 2>/dev/null | grep -cE "Running|Completed" || true)
-        if [[ $total -gt 0 && $total -eq $running ]]; then
-            ok "All pods ($label) in $namespace are running"
-            return 0
-        fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-    warn "Some pods ($label) in $namespace are not ready after ${timeout}s"
-    kubectl get pods -n "$namespace" -l "$label" 2>/dev/null || true
-    return 1
-}
+if $UNINSTALL; then
+    teardown
+fi
 
-wait_for_all_pods_namespace() {
-    local namespace=$1
-    local timeout=$2
-    local elapsed=0
-    log "Waiting up to ${timeout}s for all pods in ${namespace}..."
-    while [[ $elapsed -lt $timeout ]]; do
-        local not_ready
-        not_ready=$(kubectl get pods -n "$namespace" --no-headers 2>/dev/null | grep -cvE "Running|Completed" || true)
-        if [[ $not_ready -eq 0 ]]; then
-            local total
-            total=$(kubectl get pods -n "$namespace" --no-headers 2>/dev/null | wc -l)
-            if [[ $total -gt 0 ]]; then
-                ok "All $total pods in $namespace are running"
-                return 0
-            fi
-        fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-    warn "Some pods in $namespace are not ready after ${timeout}s"
-    kubectl get pods -n "$namespace" --no-headers 2>/dev/null || true
-    return 1
-}
-
-# ============================================================================
-# STEP 0: Pre-flight checks
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Pre-flight
+# ---------------------------------------------------------------------------
 echo ""
 echo "============================================================"
-echo "  Intel NUC16 Panther Lake: K3s + NPU Setup Script"
+echo "  Intel NUC: K3s + NPU Setup"
+if $DRY_RUN; then echo "  ** DRY RUN — no changes will be made **"; fi
+echo "  Installing as: root (system), $CALLING_USER (helm/k8s)"
 echo "============================================================"
 echo ""
 
-check_root
-check_lxc
+if [[ ! -c /dev/accel/accel0 ]]; then
+    fail "/dev/accel/accel0 not found. Run setup-toolbox-npu.sh first to add udev rules."
+fi
+ok "/dev/accel/accel0: $(ls -la /dev/accel/accel0)"
 
-# ============================================================================
+# ---------------------------------------------------------------------------
+# STEP 1: System packages
+# ---------------------------------------------------------------------------
+log "STEP 1: Installing system prerequisites..."
 
 install_packages() {
     local pkgs=("$@")
-
-    # Check for package manager
-    if command -v apt-get &> /dev/null; then
-        apt-get update -qq || fail "apt-get update failed"
-        apt-get upgrade -y -qq || warn "apt-get upgrade had warnings"
-        apt-get install -y -qq "${pkgs[@]}" || fail "Failed to install prerequisites"
-    elif command -v dnf &> /dev/null; then
-        # Map debian names to fedora names
+    if command -v apt-get &>/dev/null; then
+        dry apt-get update -qq
+        dry apt-get install -y -qq "${pkgs[@]}"
+    elif command -v dnf &>/dev/null; then
         local fedora_pkgs=()
         for pkg in "${pkgs[@]}"; do
             case "$pkg" in
-                "open-iscsi") fedora_pkgs+=("iscsi-initiator-utils") ;;
-                "nfs-common") fedora_pkgs+=("nfs-utils") ;;
-                "apt-transport-https"|"gnupg2") ;; # Skip debian-specific ones
+                open-iscsi) fedora_pkgs+=(iscsi-initiator-utils) ;;
+                nfs-common)  fedora_pkgs+=(nfs-utils) ;;
+                apt-transport-https|gnupg2) ;; # debian-only, skip
                 *) fedora_pkgs+=("$pkg") ;;
             esac
         done
-
-        if command -v rpm-ostree &> /dev/null; then
-            # Silverblue/IoT uses rpm-ostree
+        if command -v rpm-ostree &>/dev/null; then
             local missing=()
             for pkg in "${fedora_pkgs[@]}"; do
-                if ! rpm -q "$pkg" &> /dev/null; then
-                    missing+=("$pkg")
-                fi
+                rpm -q "$pkg" &>/dev/null || missing+=("$pkg")
             done
-            if [ ${#missing[@]} -gt 0 ]; then
-                log "rpm-ostree detected. The following packages need to be installed:"
-                log "${missing[*]}"
-                log "Please install them manually using 'rpm-ostree install <packages>' and reboot, or use --apply-live."
-                warn "Attempting to continue without them..."
+            if [[ ${#missing[@]} -gt 0 ]]; then
+                warn "Missing packages for rpm-ostree: ${missing[*]}"
+                warn "Run: rpm-ostree install ${missing[*]} && reboot"
             fi
         else
-            dnf install -y "${fedora_pkgs[@]}" || fail "Failed to install prerequisites"
+            dry dnf install -y "${fedora_pkgs[@]}"
         fi
     else
-        fail "Could not find supported package manager (apt-get, dnf, rpm-ostree)"
+        fail "No supported package manager found (apt-get, dnf)"
     fi
 }
 
-# STEP 1: System prerequisites
-# ============================================================================
-log "STEP 1: Installing system prerequisites..."
+install_packages curl wget ca-certificates open-iscsi nfs-common jq make
 
-install_packages curl wget gnupg2 ca-certificates apt-transport-https open-iscsi nfs-common jq make
-
-ok "System packages installed"
-
-# K3s requires /dev/kmsg
+# /dev/kmsg required by k3s in LXC environments
 if [[ ! -e /dev/kmsg ]]; then
-    ln -s /dev/console /dev/kmsg
-    log "Created /dev/kmsg -> /dev/console symlink"
+    dry ln -s /dev/console /dev/kmsg
+    log "Created /dev/kmsg -> /dev/console"
 fi
 
-# Persist across reboots
-cat > /etc/rc.local << 'RCLOCAL'
-#!/bin/sh -e
-if [ ! -e /dev/kmsg ]; then
-    ln -s /dev/console /dev/kmsg
+# Use a dedicated systemd oneshot instead of clobbering /etc/rc.local
+if [[ ! -f /etc/systemd/system/k3s-mount-rshared.service ]]; then
+    log "Installing k3s-mount-rshared systemd service..."
+    if ! $DRY_RUN; then
+        cat > /etc/systemd/system/k3s-mount-rshared.service << 'EOF'
+[Unit]
+Description=Make root mount shared for k3s
+Before=k3s.service
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/bin/mount --make-rshared /
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    else
+        echo "  [DRY RUN] write /etc/systemd/system/k3s-mount-rshared.service"
+    fi
+    dry systemctl daemon-reload
+    dry systemctl enable k3s-mount-rshared.service
 fi
-mount --make-rshared /
-exit 0
-RCLOCAL
-chmod +x /etc/rc.local
-systemctl enable rc-local 2>/dev/null || true
-systemctl start rc-local 2>/dev/null || true
 
-mount --make-rshared / 2>/dev/null || warn "mount --make-rshared failed (may already be set)"
-swapoff -a 2>/dev/null || true
+dry mount --make-rshared / 2>/dev/null || warn "mount --make-rshared failed (may already be set)"
+dry swapoff -a 2>/dev/null || true
 
-if ! echo "$PATH" | grep -q "/usr/local/bin"; then
-    export PATH="$PATH:/usr/local/bin"
-fi
+ok "System prerequisites done"
 
-# bashrc setup
-grep -q 'usr/local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH=$PATH:/usr/local/bin' >> ~/.bashrc
-grep -q 'alias k=kubectl' ~/.bashrc 2>/dev/null || {
-    echo 'source <(kubectl completion bash)' >> ~/.bashrc
-    echo 'alias k=kubectl' >> ~/.bashrc
-    echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc
-}
-
-ok "System prerequisites configured"
-
-check_npu_device
-
-# ============================================================================
+# ---------------------------------------------------------------------------
 # STEP 2: Install K3s
-# ============================================================================
+# ---------------------------------------------------------------------------
 log "STEP 2: Installing K3s..."
 
 if command -v k3s &>/dev/null && systemctl is-active --quiet k3s 2>/dev/null; then
-    ok "K3s is already installed and running, skipping installation"
+    ok "K3s already running, skipping"
 else
     K3S_FLAGS="--write-kubeconfig-mode 644 --snapshotter=native"
     K3S_FLAGS="$K3S_FLAGS --kubelet-arg=feature-gates=KubeletInUserNamespace=true"
     K3S_FLAGS="$K3S_FLAGS --kube-controller-manager-arg=feature-gates=KubeletInUserNamespace=true"
     K3S_FLAGS="$K3S_FLAGS --kube-apiserver-arg=feature-gates=KubeletInUserNamespace=true"
+    $K3S_DISABLE_TRAEFIK   && K3S_FLAGS="$K3S_FLAGS --disable=traefik"
+    $K3S_DISABLE_SERVICELB && K3S_FLAGS="$K3S_FLAGS --disable=servicelb"
 
-    if [[ "$K3S_DISABLE_TRAEFIK" == true ]]; then
-        K3S_FLAGS="$K3S_FLAGS --disable=traefik"
+    if ! $DRY_RUN; then
+        # Download then execute (not pipe-to-sh) so the script is auditable
+        wget -q https://get.k3s.io -O /tmp/k3s-install.sh
+        chmod +x /tmp/k3s-install.sh
+        INSTALL_K3S_EXEC="server $K3S_FLAGS" /tmp/k3s-install.sh
+        rm -f /tmp/k3s-install.sh
+    else
+        echo "  [DRY RUN] download https://get.k3s.io, execute with: INSTALL_K3S_EXEC='server $K3S_FLAGS'"
     fi
-    if [[ "$K3S_DISABLE_SERVICELB" == true ]]; then
-        K3S_FLAGS="$K3S_FLAGS --disable=servicelb"
-    fi
-
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server $K3S_FLAGS" sh - \
-        || fail "K3s installation failed"
-
     ok "K3s installed"
 fi
 
-# Set up kubeconfig for all users (including sudo)
+# Set up kubeconfig for the calling user (not root)
+dry mkdir -p "$CALLING_HOME/.kube"
+if [[ -f /etc/rancher/k3s/k3s.yaml ]]; then
+    dry cp /etc/rancher/k3s/k3s.yaml "$CALLING_HOME/.kube/config"
+    dry chown "$CALLING_USER:$CALLING_USER" "$CALLING_HOME/.kube/config"
+    dry chmod 600 "$CALLING_HOME/.kube/config"
+fi
+
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-grep -q 'KUBECONFIG' /etc/environment 2>/dev/null || echo 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> /etc/environment
+if ! grep -q 'KUBECONFIG' /etc/environment 2>/dev/null; then
+    dry bash -c 'echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> /etc/environment'
+fi
+
+# Shell aliases for the calling user (not root)
+CALLING_BASHRC="$CALLING_HOME/.bashrc"
+grep -q 'alias k=kubectl' "$CALLING_BASHRC" 2>/dev/null || dry bash -c "cat >> '$CALLING_BASHRC' << 'ALIASES'
+source <(kubectl completion bash) 2>/dev/null || true
+alias k=kubectl
+complete -o default -F __start_kubectl k
+ALIASES"
 
 # Wait for K3s to be ready
-wait_for_k3s_ready $K3S_READY_TIMEOUT
+if ! $DRY_RUN; then
+    log "Waiting up to ${K3S_READY_TIMEOUT}s for K3s node to be Ready..."
+    elapsed=0
+    while [[ $elapsed -lt $K3S_READY_TIMEOUT ]]; do
+        run_as_user kubectl get nodes 2>/dev/null | grep -q ' Ready ' && break
+        sleep 5; elapsed=$((elapsed + 5))
+    done
+    run_as_user kubectl get nodes 2>/dev/null | grep -q ' Ready ' \
+        && ok "K3s node is Ready" \
+        || fail "K3s did not become Ready within ${K3S_READY_TIMEOUT}s. Check: systemctl status k3s"
+fi
 
-# Show node info
-kubectl get nodes
-echo ""
-
-# ============================================================================
-# STEP 3: Install Helm
-# ============================================================================
+# ---------------------------------------------------------------------------
+# STEP 3: Helm
+# ---------------------------------------------------------------------------
 log "STEP 3: Installing Helm..."
 
 if command -v helm &>/dev/null; then
-    ok "Helm is already installed ($(helm version --short 2>/dev/null))"
+    ok "Helm already installed ($(helm version --short 2>/dev/null))"
 else
-    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
-        || fail "Helm installation failed"
+    if ! $DRY_RUN; then
+        # Download then execute — check the script at /tmp/get-helm-3.sh before running if paranoid
+        wget -q https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 -O /tmp/get-helm-3.sh
+        chmod +x /tmp/get-helm-3.sh
+        /tmp/get-helm-3.sh
+        rm -f /tmp/get-helm-3.sh
+    else
+        echo "  [DRY RUN] download + execute helm installer"
+    fi
     ok "Helm installed"
 fi
 
-# ============================================================================
-# STEP 4: Install nerdctl (container build tool for containerd/K3s)
-# ============================================================================
+# ---------------------------------------------------------------------------
+# STEP 4: nerdctl (binary only — avoids scattering containerd/CNI into /usr/local)
+# ---------------------------------------------------------------------------
 log "STEP 4: Installing nerdctl..."
 
 if command -v nerdctl &>/dev/null; then
-    ok "nerdctl is already installed ($(nerdctl --version 2>/dev/null))"
+    ok "nerdctl already installed ($(nerdctl --version 2>/dev/null))"
 else
-    NERDCTL_VERSION=$(curl -sL https://api.github.com/repos/containerd/nerdctl/releases/latest | jq -r .tag_name | sed 's/^v//')
-    if [[ -z "$NERDCTL_VERSION" || "$NERDCTL_VERSION" == "null" ]]; then
-        fail "Could not determine latest nerdctl version from GitHub API"
-    fi
+    NERDCTL_VERSION=$(curl -sL https://api.github.com/repos/containerd/nerdctl/releases/latest \
+        | jq -r .tag_name | sed 's/^v//')
+    [[ -z "$NERDCTL_VERSION" || "$NERDCTL_VERSION" == "null" ]] \
+        && fail "Could not determine nerdctl version from GitHub API"
 
-    NERDCTL_URL="https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz"
-    log "Downloading nerdctl v${NERDCTL_VERSION}..."
+    # Binary-only archive: single nerdctl binary, nothing else
+    NERDCTL_URL="https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-${NERDCTL_VERSION}-linux-amd64.tar.gz"
+    log "Downloading nerdctl v${NERDCTL_VERSION} (binary only)..."
 
-    wget -q "$NERDCTL_URL" -O /tmp/nerdctl.tar.gz \
-        || fail "Failed to download nerdctl from $NERDCTL_URL"
-
-    FILESIZE=$(stat -c%s /tmp/nerdctl.tar.gz 2>/dev/null || echo "0")
-    if [[ "$FILESIZE" -lt 1000 ]]; then
+    if ! $DRY_RUN; then
+        wget -q "$NERDCTL_URL" -O /tmp/nerdctl.tar.gz
+        [[ $(stat -c%s /tmp/nerdctl.tar.gz) -lt 1000 ]] \
+            && fail "nerdctl archive too small — bad download?"
+        tar -xzf /tmp/nerdctl.tar.gz -C /usr/local/bin nerdctl
         rm -f /tmp/nerdctl.tar.gz
-        fail "Downloaded nerdctl archive is too small (${FILESIZE} bytes) -- likely a bad URL or redirect"
+    else
+        echo "  [DRY RUN] download $NERDCTL_URL, extract nerdctl binary to /usr/local/bin/"
     fi
-
-    tar -xzf /tmp/nerdctl.tar.gz -C /usr/local/ \
-        || fail "Failed to extract nerdctl"
-    rm -f /tmp/nerdctl.tar.gz
-
-    if ! command -v nerdctl &>/dev/null; then
-        fail "nerdctl not found in PATH after installation"
-    fi
-
     ok "nerdctl v${NERDCTL_VERSION} installed"
 fi
 
-# ============================================================================
-# STEP 5: Add Helm repos
-# ============================================================================
-log "STEP 5: Adding Helm repositories..."
+# ---------------------------------------------------------------------------
+# STEP 5-9: Helm charts (all run as calling user)
+# ---------------------------------------------------------------------------
 
-helm repo add nfd https://kubernetes-sigs.github.io/node-feature-discovery/charts 2>/dev/null || true
-helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
-helm repo add intel https://intel.github.io/helm-charts/ 2>/dev/null || true
-helm repo update || fail "Helm repo update failed"
+wait_for_all_pods() {
+    local ns=$1 timeout=$2 elapsed=0
+    $DRY_RUN && return 0
+    log "Waiting up to ${timeout}s for all pods in $ns..."
+    while [[ $elapsed -lt $timeout ]]; do
+        not_ready=$(run_as_user kubectl get pods -n "$ns" --no-headers 2>/dev/null \
+            | grep -cvE 'Running|Completed' || true)
+        total=$(run_as_user kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l)
+        [[ $not_ready -eq 0 && $total -gt 0 ]] && { ok "All $total pods in $ns are running"; return 0; }
+        sleep 5; elapsed=$((elapsed + 5))
+    done
+    warn "Some pods in $ns not ready after ${timeout}s"
+    run_as_user kubectl get pods -n "$ns" 2>/dev/null || true
+}
 
-ok "Helm repositories configured"
+log "STEP 5: Helm repositories..."
+dry_as_user helm repo add nfd     https://kubernetes-sigs.github.io/node-feature-discovery/charts 2>/dev/null || true
+dry_as_user helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true
+dry_as_user helm repo add intel   https://intel.github.io/helm-charts/ 2>/dev/null || true
+dry_as_user helm repo update
+ok "Helm repos configured"
 
-# ============================================================================
-# STEP 6: Install Node Feature Discovery (NFD)
-# ============================================================================
-log "STEP 6: Installing Node Feature Discovery..."
-
-if helm status nfd -n node-feature-discovery &>/dev/null; then
-    ok "NFD is already installed, skipping"
+log "STEP 6: Node Feature Discovery..."
+if run_as_user helm status nfd -n node-feature-discovery &>/dev/null 2>&1; then
+    ok "NFD already installed"
 else
-    helm install nfd nfd/node-feature-discovery \
-        --namespace node-feature-discovery \
-        --create-namespace \
-        --version "$NFD_VERSION" \
-        --wait \
-        --timeout "$HELM_TIMEOUT" \
-        || fail "NFD installation failed"
+    dry_as_user helm install nfd nfd/node-feature-discovery \
+        --namespace node-feature-discovery --create-namespace \
+        --version "$NFD_VERSION" --wait --timeout "$HELM_TIMEOUT"
     ok "NFD installed"
 fi
+wait_for_all_pods node-feature-discovery $POD_READY_TIMEOUT
 
-wait_for_all_pods_namespace "node-feature-discovery" "$POD_READY_TIMEOUT"
-
-# Wait for NFD to label the node (takes a few seconds after pods start)
-log "Waiting for NFD to detect hardware..."
-sleep 10
-
-# Verify NFD detected the NPU via PCI
-if kubectl get node -o json | jq -e '.items[].metadata.labels["feature.node.kubernetes.io/pci-1200_8086.present"]' &>/dev/null; then
-    ok "NFD detected Intel NPU (PCI class 1200, vendor 8086)"
+log "STEP 7: cert-manager..."
+if run_as_user helm status cert-manager -n cert-manager &>/dev/null 2>&1; then
+    ok "cert-manager already installed"
 else
-    warn "NFD has not labeled the node with PCI-1200_8086. The NPU may not be detected."
-    warn "Check NFD worker logs: kubectl logs -n node-feature-discovery -l app.kubernetes.io/component=worker"
-fi
-
-# ============================================================================
-# STEP 7: Install cert-manager
-# ============================================================================
-log "STEP 7: Installing cert-manager..."
-
-if helm status cert-manager -n cert-manager &>/dev/null; then
-    ok "cert-manager is already installed, skipping"
-else
-    helm install cert-manager jetstack/cert-manager \
-        --namespace cert-manager \
-        --create-namespace \
-        --version "$CERTMANAGER_VERSION" \
-        --set installCRDs=true \
-        --wait \
-        --timeout "$HELM_TIMEOUT" \
-        || fail "cert-manager installation failed"
+    dry_as_user helm install cert-manager jetstack/cert-manager \
+        --namespace cert-manager --create-namespace \
+        --version "$CERTMANAGER_VERSION" --set installCRDs=true \
+        --wait --timeout "$HELM_TIMEOUT"
     ok "cert-manager installed"
 fi
+wait_for_all_pods cert-manager $POD_READY_TIMEOUT
 
-wait_for_all_pods_namespace "cert-manager" "$POD_READY_TIMEOUT"
-
-# ============================================================================
-# STEP 8: Install Intel Device Plugin Operator
-# ============================================================================
-log "STEP 8: Installing Intel Device Plugin Operator..."
-
-if helm status dp-operator -n inteldeviceplugins-system &>/dev/null; then
-    ok "Intel Device Plugin Operator is already installed, skipping"
+log "STEP 8: Intel Device Plugin Operator..."
+if run_as_user helm status dp-operator -n inteldeviceplugins-system &>/dev/null 2>&1; then
+    ok "Intel Device Plugin Operator already installed"
 else
-    helm install dp-operator intel/intel-device-plugins-operator \
-        --namespace inteldeviceplugins-system \
-        --create-namespace \
-        --wait \
-        --timeout "$HELM_TIMEOUT" \
-        || fail "Intel Device Plugin Operator installation failed"
+    dry_as_user helm install dp-operator intel/intel-device-plugins-operator \
+        --namespace inteldeviceplugins-system --create-namespace \
+        --wait --timeout "$HELM_TIMEOUT"
     ok "Intel Device Plugin Operator installed"
 fi
+wait_for_all_pods inteldeviceplugins-system $POD_READY_TIMEOUT
 
-wait_for_all_pods_namespace "inteldeviceplugins-system" "$POD_READY_TIMEOUT"
-
-# ============================================================================
-# STEP 9: Install Intel NPU Device Plugin
-# ============================================================================
-log "STEP 9: Installing Intel NPU Device Plugin..."
-
-if helm status npu -n inteldeviceplugins-system &>/dev/null; then
-    ok "Intel NPU Device Plugin is already installed, skipping"
+log "STEP 9: Intel NPU Device Plugin..."
+if run_as_user helm status npu -n inteldeviceplugins-system &>/dev/null 2>&1; then
+    ok "NPU Device Plugin already installed"
 else
-    helm install npu intel/intel-device-plugins-npu \
-        --namespace inteldeviceplugins-system \
-        --create-namespace \
-        --set nodeFeatureRule=true \
-        || fail "Intel NPU Device Plugin installation failed"
-    ok "Intel NPU Device Plugin installed"
+    dry_as_user helm install npu intel/intel-device-plugins-npu \
+        --namespace inteldeviceplugins-system --create-namespace \
+        --set nodeFeatureRule=true
+    ok "NPU Device Plugin installed"
 fi
 
-# ============================================================================
+# ---------------------------------------------------------------------------
 # STEP 10: Patch NodeFeatureRule for Panther Lake
-# ============================================================================
-log "STEP 10: Checking NodeFeatureRule for Panther Lake device ID ($PANTHER_LAKE_DEVICE_ID)..."
+# ---------------------------------------------------------------------------
+log "STEP 10: Checking NodeFeatureRule for Panther Lake ($PANTHER_LAKE_DEVICE_ID)..."
 
-# Wait for the NodeFeatureRule to exist
-ELAPSED=0
-while [[ $ELAPSED -lt 30 ]]; do
-    if kubectl get nodefeaturerule intel-dp-npu-device &>/dev/null; then
-        break
+if ! $DRY_RUN; then
+    elapsed=0
+    while [[ $elapsed -lt 30 ]]; do
+        run_as_user kubectl get nodefeaturerule intel-dp-npu-device &>/dev/null && break
+        sleep 2; elapsed=$((elapsed + 2))
+    done
+    run_as_user kubectl get nodefeaturerule intel-dp-npu-device &>/dev/null \
+        || fail "NodeFeatureRule not found after 30s"
+
+    existing=$(run_as_user kubectl get nodefeaturerule intel-dp-npu-device -o json \
+        | jq -r '.spec.rules[0].matchFeatures[0].matchExpressions.device.value[]' 2>/dev/null)
+    if echo "$existing" | grep -q "$PANTHER_LAKE_DEVICE_ID"; then
+        ok "Panther Lake device ID already in NodeFeatureRule"
+    else
+        run_as_user kubectl patch nodefeaturerule intel-dp-npu-device --type='json' -p="[
+            {\"op\": \"add\", \"path\": \"/spec/rules/0/matchFeatures/0/matchExpressions/device/value/-\", \"value\": \"$PANTHER_LAKE_DEVICE_ID\"}
+        ]" || fail "Failed to patch NodeFeatureRule"
+        ok "Added Panther Lake device ID to NodeFeatureRule"
     fi
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
-done
-
-if ! kubectl get nodefeaturerule intel-dp-npu-device &>/dev/null; then
-    fail "NodeFeatureRule 'intel-dp-npu-device' not found. The NPU Helm chart may not have created it."
-fi
-
-# Check if the Panther Lake device ID is already in the rule
-EXISTING_IDS=$(kubectl get nodefeaturerule intel-dp-npu-device -o json \
-    | jq -r '.spec.rules[0].matchFeatures[0].matchExpressions.device.value[]' 2>/dev/null)
-
-if echo "$EXISTING_IDS" | grep -q "$PANTHER_LAKE_DEVICE_ID"; then
-    ok "Panther Lake device ID ($PANTHER_LAKE_DEVICE_ID) already in NodeFeatureRule"
 else
-    log "Adding Panther Lake device ID ($PANTHER_LAKE_DEVICE_ID) to NodeFeatureRule..."
-    kubectl patch nodefeaturerule intel-dp-npu-device --type='json' -p="[
-        {\"op\": \"add\", \"path\": \"/spec/rules/0/matchFeatures/0/matchExpressions/device/value/-\", \"value\": \"$PANTHER_LAKE_DEVICE_ID\"}
-    ]" || fail "Failed to patch NodeFeatureRule"
-    ok "Panther Lake device ID added to NodeFeatureRule"
+    echo "  [DRY RUN] patch nodefeaturerule intel-dp-npu-device to add $PANTHER_LAKE_DEVICE_ID"
 fi
 
-# Wait for NFD to apply the label
-log "Waiting for NFD to apply intel.feature.node.kubernetes.io/npu=true label..."
-ELAPSED=0
-while [[ $ELAPSED -lt 60 ]]; do
-    if kubectl get node -o json | jq -e '.items[].metadata.labels["intel.feature.node.kubernetes.io/npu"]' &>/dev/null; then
-        ok "NPU label applied to node"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-done
+# ---------------------------------------------------------------------------
+# STEP 11: Verify NPU schedulable
+# ---------------------------------------------------------------------------
+log "STEP 11: Waiting for NPU to register as schedulable..."
 
-if ! kubectl get node -o json | jq -e '.items[].metadata.labels["intel.feature.node.kubernetes.io/npu"]' &>/dev/null; then
-    warn "NPU label not applied after 60s. The NPU DaemonSet may not schedule."
-    warn "Debug: kubectl get nodefeaturerule intel-dp-npu-device -o yaml"
+if ! $DRY_RUN; then
+    sleep 10
+    wait_for_all_pods inteldeviceplugins-system $POD_READY_TIMEOUT
+    elapsed=0
+    while [[ $elapsed -lt $NPU_REGISTER_TIMEOUT ]]; do
+        NPU_COUNT=$(run_as_user kubectl get node -o json \
+            | jq -r '.items[0].status.allocatable["npu.intel.com/accel"] // empty' 2>/dev/null)
+        [[ -n "$NPU_COUNT" && "$NPU_COUNT" != "0" ]] && { ok "NPU schedulable: npu.intel.com/accel=$NPU_COUNT"; break; }
+        sleep 5; elapsed=$((elapsed + 5))
+    done
+    [[ -z "${NPU_COUNT:-}" || "${NPU_COUNT:-}" == "0" ]] \
+        && warn "NPU not yet in allocatable — check: kubectl logs -n inteldeviceplugins-system -l app=intel-npu-plugin"
 fi
 
-# ============================================================================
-# STEP 11: Verify NPU is schedulable
-# ============================================================================
-log "STEP 11: Waiting for NPU to register as a schedulable resource..."
+# ---------------------------------------------------------------------------
+# STEP 12: NPU test pod
+# ---------------------------------------------------------------------------
+log "STEP 12: Running NPU test pod..."
 
-# Wait for the NPU plugin pod to start
-sleep 10
-wait_for_all_pods_namespace "inteldeviceplugins-system" "$POD_READY_TIMEOUT"
-
-# Wait for the NPU resource to appear
-ELAPSED=0
-while [[ $ELAPSED -lt $NPU_REGISTER_TIMEOUT ]]; do
-    NPU_COUNT=$(kubectl get node -o json | jq -r '.items[0].status.allocatable["npu.intel.com/accel"] // empty' 2>/dev/null)
-    if [[ -n "$NPU_COUNT" && "$NPU_COUNT" != "0" ]]; then
-        ok "NPU is schedulable: npu.intel.com/accel = $NPU_COUNT"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-done
-
-if [[ -z "${NPU_COUNT:-}" || "${NPU_COUNT:-}" == "0" ]]; then
-    warn "NPU resource not found in node allocatable after ${NPU_REGISTER_TIMEOUT}s"
-    warn "Debug steps:"
-    warn "  kubectl get pods -n inteldeviceplugins-system"
-    warn "  kubectl logs -n inteldeviceplugins-system -l app=intel-npu-plugin"
-    warn "  kubectl get node -o json | jq '.items[].status.allocatable'"
-fi
-
-# ============================================================================
-# STEP 12: Run NPU test pod
-# ============================================================================
-log "STEP 12: Running NPU device test pod..."
-
-# Clean up any previous test pod
-kubectl delete pod npu-test --ignore-not-found=true 2>/dev/null
-sleep 2
-
-cat <<'TESTPOD' | kubectl apply -f -
+if ! $DRY_RUN; then
+    run_as_user kubectl delete pod npu-test --ignore-not-found=true 2>/dev/null
+    sleep 2
+    run_as_user kubectl apply -f - << 'TESTPOD'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -529,79 +496,49 @@ spec:
     args:
     - |
       echo "=== NPU Device Test ==="
-      echo "Checking for /dev/accel devices..."
       ls -la /dev/accel/ 2>/dev/null || echo "ERROR: /dev/accel not found"
-      echo ""
-      echo "Device info:"
-      cat /sys/class/accel/accel0/device/uevent 2>/dev/null || echo "Cannot read device info"
-      echo ""
-      echo "NPU test complete."
+      cat /sys/class/accel/accel0/device/uevent 2>/dev/null || true
     resources:
       limits:
-        npu.intel.com/accel: 1
+        npu.intel.com/accel: "1"
       requests:
-        npu.intel.com/accel: 1
+        npu.intel.com/accel: "1"
 TESTPOD
 
-# Wait for the test pod to complete
-log "Waiting for test pod to complete..."
-ELAPSED=0
-while [[ $ELAPSED -lt 120 ]]; do
-    PHASE=$(kubectl get pod npu-test -o jsonpath='{.status.phase}' 2>/dev/null)
-    if [[ "$PHASE" == "Succeeded" ]]; then
-        break
-    elif [[ "$PHASE" == "Failed" ]]; then
-        warn "Test pod failed"
-        break
-    fi
-    sleep 3
-    ELAPSED=$((ELAPSED + 3))
-done
-
-echo ""
-echo "--- Test pod output ---"
-kubectl logs npu-test 2>/dev/null || warn "Could not get test pod logs"
-echo "--- End test pod output ---"
-echo ""
-
-# Check if test passed
-if kubectl logs npu-test 2>/dev/null | grep -q "/dev/accel/accel0"; then
-    ok "NPU device is accessible from Kubernetes pods!"
+    elapsed=0
+    while [[ $elapsed -lt 120 ]]; do
+        phase=$(run_as_user kubectl get pod npu-test -o jsonpath='{.status.phase}' 2>/dev/null)
+        [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]] && break
+        sleep 3; elapsed=$((elapsed + 3))
+    done
+    echo ""
+    echo "--- Test pod output ---"
+    run_as_user kubectl logs npu-test 2>/dev/null || warn "Could not get test pod logs"
+    echo "--- End test pod output ---"
+    run_as_user kubectl logs npu-test 2>/dev/null | grep -q '/dev/accel/accel0' \
+        && ok "NPU accessible from Kubernetes pods!" \
+        || warn "NPU device not visible in test pod"
+    run_as_user kubectl delete pod npu-test --ignore-not-found=true 2>/dev/null
 else
-    warn "NPU device was not visible in the test pod"
+    echo "  [DRY RUN] deploy and run NPU test pod"
 fi
 
-# Clean up test pod
-kubectl delete pod npu-test --ignore-not-found=true 2>/dev/null
-
-# ============================================================================
+# ---------------------------------------------------------------------------
 # Summary
-# ============================================================================
+# ---------------------------------------------------------------------------
 echo ""
 echo "============================================================"
 echo "  Setup Complete!"
+if $DRY_RUN; then echo "  (dry run — no changes were made)"; fi
 echo "============================================================"
 echo ""
-echo "  Components installed:"
-echo "    - K3s (Kubernetes)"
-echo "    - Helm"
-echo "    - Node Feature Discovery (NFD)"
-echo "    - cert-manager"
-echo "    - Intel Device Plugin Operator"
-echo "    - Intel NPU Device Plugin"
+echo "  Kubeconfig: $CALLING_HOME/.kube/config"
 echo ""
-echo "  NPU resource: npu.intel.com/accel"
-echo ""
-echo "  Quick commands:"
+echo "  Quick commands (run as $CALLING_USER):"
 echo "    kubectl get nodes"
 echo "    kubectl get pods -A"
 echo "    kubectl get node -o json | jq '.items[].status.allocatable'"
 echo ""
-echo "  To run an OpenVINO workload with NPU access, add to your pod spec:"
-echo "    resources:"
-echo "      limits:"
-echo "        npu.intel.com/accel: 1"
-echo ""
-echo "  NOTE: Source your shell config to pick up aliases:"
-echo "    source ~/.bashrc"
+echo "  To undo everything:"
+echo "    sudo $0 --uninstall"
 echo ""
