@@ -1,0 +1,74 @@
+---
+- name: Install required packages (Debian/Ubuntu)
+  apt:
+    name:
+      - openssh-server
+      - sudo
+      - emacs-nox
+      - net-tools
+      - make
+      - git
+      - python3-passlib
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Install required packages (RedHat/Fedora)
+  dnf:
+    name:
+      - openssh-server
+      - sudo
+      - emacs-nox
+      - net-tools
+      - make
+      - git
+      - python3-passlib
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Enable and start SSH service
+  service:
+    name: sshd
+    state: started
+    enabled: yes
+  when: ansible_os_family == "RedHat"
+
+- name: Enable and start SSH service (Debian)
+  service:
+    name: ssh
+    state: started
+    enabled: yes
+  when: ansible_os_family == "Debian"
+
+- name: Configure SSH to permit root login with password
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitRootLogin'
+    line: 'PermitRootLogin yes'
+  notify: restart ssh
+
+- name: Create user smbaker (Debian)
+  user:
+    name: smbaker
+    uid: 1026
+    shell: /bin/bash
+    password: "{{ 'smbaker' | password_hash('sha512') }}"
+    groups: sudo
+    append: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create user smbaker (RedHat)
+  user:
+    name: smbaker
+    uid: 1026
+    shell: /bin/bash
+    password: "{{ 'smbaker' | password_hash('sha512') }}"
+    groups: wheel
+    append: yes
+  when: ansible_os_family == "RedHat"
+
+- name: Allow smbaker to run sudo commands without password
+  copy:
+    dest: /etc/sudoers.d/smbaker
+    content: 'smbaker ALL=(ALL) NOPASSWD:ALL'
+    mode: '0440'

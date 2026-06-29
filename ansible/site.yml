@@ -1,0 +1,4 @@
+---
+- import_playbook: playbooks/provision_host.yml
+- import_playbook: playbooks/provision_cluster.yml
+- import_playbook: playbooks/provision_services.yml

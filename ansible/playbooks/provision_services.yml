@@ -1,0 +1,7 @@
+---
+- name: Provision Services
+  hosts: localhost
+  become: yes
+  roles:
+    - ../roles/npu
+    - ../roles/gpu

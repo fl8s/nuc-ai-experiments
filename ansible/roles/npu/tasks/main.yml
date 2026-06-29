@@ -1,0 +1,100 @@
+---
+- name: Add NFD Helm repo
+  command: /usr/local/bin/helm repo add nfd https://kubernetes-sigs.github.io/node-feature-discovery/charts
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Add Jetstack Helm repo
+  command: /usr/local/bin/helm repo add jetstack https://charts.jetstack.io
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Update Helm repos
+  command: /usr/local/bin/helm repo update
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install Node Feature Discovery (NFD)
+  command: >
+    /usr/local/bin/helm upgrade --install nfd nfd/node-feature-discovery
+    --namespace node-feature-discovery
+    --create-namespace
+    --version 0.16.4
+    --wait
+    --timeout 120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install cert-manager
+  command: >
+    /usr/local/bin/helm upgrade --install cert-manager jetstack/cert-manager
+    --namespace cert-manager
+    --create-namespace
+    --version v1.15.2
+    --set installCRDs=true
+    --wait
+    --timeout 120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install Intel Device Plugin Operator
+  command: >
+    /usr/local/bin/helm upgrade --install dp-operator intel/intel-device-plugins-operator
+    --namespace inteldeviceplugins-system
+    --create-namespace
+    --wait
+    --timeout 120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install Intel NPU Device Plugin
+  command: >
+    /usr/local/bin/helm upgrade --install npu intel/intel-device-plugins-npu
+    --namespace inteldeviceplugins-system
+    --create-namespace
+    --set nodeFeatureRule=true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for NodeFeatureRule intel-dp-npu-device to exist
+  command: /usr/local/bin/k3s kubectl get nodefeaturerule intel-dp-npu-device -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: nfr_output
+  until: nfr_output.rc == 0
+  retries: 15
+  delay: 2
+
+- name: Check if Panther Lake device ID is in NodeFeatureRule
+  command: /usr/local/bin/k3s kubectl get nodefeaturerule intel-dp-npu-device -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: existing_nfr_json
+
+- name: Patch NodeFeatureRule for Panther Lake
+  command: >
+    /usr/local/bin/k3s kubectl patch nodefeaturerule intel-dp-npu-device --type='json' -p='[
+      {"op": "add", "path": "/spec/rules/0/matchFeatures/0/matchExpressions/device/value/-", "value": "b03e"}
+    ]'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when: "'b03e' not in (existing_nfr_json.stdout | from_json).spec.rules[0].matchFeatures[0].matchExpressions.device.value"
+
+- name: Wait for NPU label to be applied to node
+  command: /usr/local/bin/k3s kubectl get node -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: node_labels_json
+  until: "'intel.feature.node.kubernetes.io/npu' in (node_labels_json.stdout | from_json).items[0].metadata.labels"
+  retries: 12
+  delay: 5
+
+- name: Wait for NPU to register as schedulable resource
+  command: /usr/local/bin/k3s kubectl get node -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: node_allocatable_json
+  until: >
+    ((node_allocatable_json.stdout | from_json).items[0].status.allocatable['npu.intel.com/accel'] | default('0')) != '0'
+  retries: 12
+  delay: 5

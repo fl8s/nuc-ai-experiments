@@ -1,0 +1,7 @@
+---
+- name: Provision Host
+  hosts: localhost
+  become: yes
+  roles:
+    - ../roles/common
+    - ../roles/npu_monitor

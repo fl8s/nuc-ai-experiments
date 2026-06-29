@@ -48,18 +48,6 @@ pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
 Create the LXC container and set the configuration to allow NPU and GPU passthrough.
 
 ```bash
-cat > /root/setup-ssh.sh
-   # paste the setup-ssh.sh script here
-
-cat > /root/setup-k3s-npu.sh
-   # paste the script here
-
-cat > /root/setup-k3s-gpu.sh
-   # paste the script here
-
-cat > /root/setup-npu-monitor.sh
-   # paste the script here
-
 pct create 100 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname k3s-node \
   --memory 32768 \
@@ -93,22 +81,24 @@ lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
 EOF
 
 pct start 100
-pct push 100 /root/setup-k3s-npu.sh /root/setup-k3s-npu.sh
-pct push 100 /root/setup-k3s-gpu.sh /root/setup-k3s-gpu.sh
-pct push 100 /root/setup-ssh.sh /root/setup-ssh.sh
-pct push 100 /root/setup-npu-monitor.sh /root/setup-npu-monitor.sh
 ```
 
-## Enter the LXC container and setup SSH, K3s, and other things
+## Enter the LXC container and setup SSH, K3s, and other things via Ansible
+
+The repository includes Ansible playbooks to provision the host, cluster, and services. First, install Ansible, then run the playbooks locally inside the LXC container.
 
 ```bash
 pct enter 100
 
-chmod +x /root/*.sh
-/root/setup-ssh.sh
-/root/setup-k3s-npu.sh
-/root/setup-k3s-gpu.sh
-/root/setup-npu-monitor.sh
+# Install Ansible
+apt-get update && apt-get install -y ansible git
+
+# Clone the repository (if you haven't already copied it in)
+git clone <this-repo-url> /opt/nuc-experiments
+cd /opt/nuc-experiments
+
+# Run the Ansible playbooks locally
+ansible-playbook ansible/site.yml
 ```
 
 At this point the LXC will have SSH running inside, making it

@@ -1,0 +1,6 @@
+---
+- name: Provision Cluster
+  hosts: localhost
+  become: yes
+  roles:
+    - ../roles/k3s
