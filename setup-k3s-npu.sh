@@ -152,26 +152,54 @@ check_root
 check_lxc
 
 # ============================================================================
+
+install_packages() {
+    local pkgs=("$@")
+
+    # Check for package manager
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq || fail "apt-get update failed"
+        apt-get upgrade -y -qq || warn "apt-get upgrade had warnings"
+        apt-get install -y -qq "${pkgs[@]}" || fail "Failed to install prerequisites"
+    elif command -v dnf &> /dev/null; then
+        # Map debian names to fedora names
+        local fedora_pkgs=()
+        for pkg in "${pkgs[@]}"; do
+            case "$pkg" in
+                "open-iscsi") fedora_pkgs+=("iscsi-initiator-utils") ;;
+                "nfs-common") fedora_pkgs+=("nfs-utils") ;;
+                "apt-transport-https"|"gnupg2") ;; # Skip debian-specific ones
+                *) fedora_pkgs+=("$pkg") ;;
+            esac
+        done
+
+        if command -v rpm-ostree &> /dev/null; then
+            # Silverblue/IoT uses rpm-ostree
+            local missing=()
+            for pkg in "${fedora_pkgs[@]}"; do
+                if ! rpm -q "$pkg" &> /dev/null; then
+                    missing+=("$pkg")
+                fi
+            done
+            if [ ${#missing[@]} -gt 0 ]; then
+                log "rpm-ostree detected. The following packages need to be installed:"
+                log "${missing[*]}"
+                log "Please install them manually using 'rpm-ostree install <packages>' and reboot, or use --apply-live."
+                warn "Attempting to continue without them..."
+            fi
+        else
+            dnf install -y "${fedora_pkgs[@]}" || fail "Failed to install prerequisites"
+        fi
+    else
+        fail "Could not find supported package manager (apt-get, dnf, rpm-ostree)"
+    fi
+}
+
 # STEP 1: System prerequisites
 # ============================================================================
 log "STEP 1: Installing system prerequisites..."
 
-# Update packages
-apt-get update -qq || fail "apt-get update failed"
-apt-get upgrade -y -qq || warn "apt-get upgrade had warnings"
-
-# Install required packages
-apt-get install -y -qq \
-    curl \
-    wget \
-    gnupg2 \
-    ca-certificates \
-    apt-transport-https \
-    open-iscsi \
-    nfs-common \
-    jq \
-    make \
-    || fail "Failed to install prerequisites"
+install_packages curl wget gnupg2 ca-certificates apt-transport-https open-iscsi nfs-common jq make
 
 ok "System packages installed"
 

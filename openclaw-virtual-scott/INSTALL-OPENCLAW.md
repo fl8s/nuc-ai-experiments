@@ -14,8 +14,13 @@ already followed that project's install, **skip to the
 ## 1. System packages
 
 ```bash
+# On Ubuntu/Debian:
 sudo apt update
 sudo apt install -y curl make python3 jq ca-certificates
+
+# On Fedora:
+sudo dnf install -y curl make python3 jq ca-certificates
+# (or rpm-ostree install -y curl make python3 jq ca-certificates && systemctl reboot)
 ```
 
 `make`, `curl`, `python3`, and `jq` are all used by this repo's
@@ -27,8 +32,13 @@ OpenClaw requires Node 24 (recommended) or 22.19+. Ubuntu's default
 `nodejs` package is too old:
 
 ```bash
+# On Ubuntu/Debian:
 curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt install -y nodejs
+
+# On Fedora:
+sudo dnf install -y nodejs
+
 node --version    # confirm v24.x.x
 ```
 
