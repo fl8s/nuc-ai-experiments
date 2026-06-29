@@ -1,0 +1,11 @@
+image: localhost/npu-chatbot:tinyllama
+modelDir: /models/tinyllama-npu
+device: NPU
+
+memory: 8Gi
+
+npu:
+  enabled: true
+
+gpu:
+  enabled: false

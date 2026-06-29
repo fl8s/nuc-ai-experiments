@@ -1,0 +1,4 @@
+apiVersion: v2
+name: npu-chatbot
+description: Interactive chatbot service with NPU/GPU/CPU device support
+version: 0.1.0

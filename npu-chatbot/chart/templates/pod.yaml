@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: npu-chatbot
+  labels:
+    app: npu-chatbot
+spec:
+  restartPolicy: Never
+  containers:
+    - name: chatbot
+      image: {{ .Values.image }}
+      imagePullPolicy: Never
+      stdin: true
+      tty: true
+      args:
+        - "--model"
+        - {{ .Values.modelDir | quote }}
+        - "--device"
+        - {{ .Values.device | quote }}
+      resources:
+        limits:
+          memory: {{ .Values.memory | quote }}
+          {{- if .Values.npu.enabled }}
+          npu.intel.com/accel: 1
+          {{- end }}
+          {{- if .Values.gpu.enabled }}
+          gpu.intel.com/xe: 1
+          {{- end }}
+        requests:
+          {{- if .Values.npu.enabled }}
+          npu.intel.com/accel: 1
+          {{- end }}
+          {{- if .Values.gpu.enabled }}
+          gpu.intel.com/xe: 1
+          {{- end }}
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 4Gi

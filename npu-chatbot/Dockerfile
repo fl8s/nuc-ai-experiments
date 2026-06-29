@@ -1,15 +1,18 @@
-FROM openvino/ubuntu24_dev:latest
+FROM ubuntu:24.04
 
-USER root
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
-RUN mkdir -p /var/lib/apt/lists/partial && \
+# Install system dependencies and Intel GPU compute runtime for Panther Lake
+RUN apt-get update -qq && \
+    apt-get install -y -qq wget curl software-properties-common python3 python3-pip python3-venv && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
     apt-get update -qq && \
-    apt-get install -y -qq wget && \
+    apt-get install -y -qq intel-opencl-icd libze-intel-gpu1 libze1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
+# Install OpenVINO and Python packages via pip (no bundled GPU plugin to conflict)
 RUN pip3 install --break-system-packages --no-cache-dir \
+    openvino==2026.0.0 \
     openvino-genai \
     "optimum[openvino]" \
     datasets
