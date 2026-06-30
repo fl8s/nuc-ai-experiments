@@ -48,6 +48,18 @@ pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
 Create the LXC container and set the configuration to allow NPU and GPU passthrough.
 
 ```bash
+cat > /root/setup-ssh.sh
+   # paste the setup-ssh.sh script here
+
+cat > /root/setup-k3s-npu.sh
+   # paste the script here
+
+cat > /root/setup-k3s-gpu.sh
+   # paste the script here
+
+cat > /root/setup-npu-monitor.sh
+   # paste the script here
+
 pct create 100 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname k3s-node \
   --memory 32768 \
@@ -103,6 +115,13 @@ You can run the entire provisioning suite using `site.yml`, or you can run indiv
 ### Execution
 
 First, install Ansible, then run the playbooks locally inside the LXC container:
+pct push 100 /root/setup-k3s-npu.sh /root/setup-k3s-npu.sh
+pct push 100 /root/setup-k3s-gpu.sh /root/setup-k3s-gpu.sh
+pct push 100 /root/setup-ssh.sh /root/setup-ssh.sh
+pct push 100 /root/setup-npu-monitor.sh /root/setup-npu-monitor.sh
+```
+
+## Enter the LXC container and setup SSH, K3s, and other things
 
 ```bash
 pct enter 100
@@ -116,6 +135,11 @@ cd /opt/nuc-experiments
 
 # Run the entire Ansible suite locally
 ansible-playbook ansible/site.yml
+chmod +x /root/*.sh
+/root/setup-ssh.sh
+/root/setup-k3s-npu.sh
+/root/setup-k3s-gpu.sh
+/root/setup-npu-monitor.sh
 ```
 
 At this point the LXC will have SSH running inside, making it
@@ -125,6 +149,28 @@ convenient to SSH in as well as to SCP in files.
 
 Copy the `npu-chatbot` and `npu-imagegen` directories to the LXC container.
 SSH, SCP, or any other method works.
+
+Copy the `npu-chatbot`, `npu-imagegen`, and `code-assistant` directories to the LXC container.
+SSH, SCP, or any other method works.
+
+## code-assistant
+
+See [code-assistant/README.md](code-assistant/README.md) for details. (Includes opencode instructions in [code-assistant/opencode/README.md](code-assistant/opencode/README.md)).
+
+```bash
+cd ~/code-assistant
+
+# list models
+make models
+
+# build and deploy the coding assistant (Qwen3-Coder-30B-A3B)
+sudo make build MODEL=qwen3-coder-30b
+make deploy MODEL=qwen3-coder-30b
+
+# test the endpoint
+make smoke
+```
+
 
 ## npu-chatbot
 
