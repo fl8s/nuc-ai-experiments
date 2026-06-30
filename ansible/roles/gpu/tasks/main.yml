@@ -1,0 +1,62 @@
+---
+- name: Verify /dev/dri exists
+  stat:
+    path: /dev/dri
+  register: dri_stat
+  failed_when: not dri_stat.stat.exists or not dri_stat.stat.isdir
+
+- name: Install Intel GPU Device Plugin
+  command: >
+    /usr/local/bin/helm upgrade --install intel-gpu-plugin intel/intel-device-plugins-gpu
+    --namespace inteldeviceplugins-system
+    --set sharedDevNum=1
+    --set nodeFeatureRule=true
+    --wait
+    --timeout 120s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for NodeFeatureRule intel-dp-gpu-device to exist
+  command: /usr/local/bin/k3s kubectl get nodefeaturerule intel-dp-gpu-device -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_nfr_output
+  until: gpu_nfr_output.rc == 0
+  retries: 15
+  delay: 2
+
+- name: Patch GPU NodeFeatureRule to fix kernel.enabledmodule error
+  command: >
+    /usr/local/bin/k3s kubectl patch nodefeaturerule intel-dp-gpu-device --type=json -p '[
+      {"op": "replace", "path": "/spec/rules/0/matchAny", "value": [
+        {"matchFeatures": [{"feature": "kernel.loadedmodule", "matchExpressions": {"i915": {"op": "Exists"}}}]},
+        {"matchFeatures": [{"feature": "kernel.loadedmodule", "matchExpressions": {"xe": {"op": "Exists"}}}]}
+      ]}
+    ]'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Restart NFD master to apply patched rule
+  command: /usr/local/bin/k3s kubectl rollout restart deployment nfd-node-feature-discovery-master -n node-feature-discovery
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for GPU label to be applied to node
+  command: /usr/local/bin/k3s kubectl get node -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_node_labels_json
+  until: "'intel.feature.node.kubernetes.io/gpu' in (gpu_node_labels_json.stdout | from_json).items[0].metadata.labels"
+  retries: 12
+  delay: 5
+
+- name: Wait for GPU to register as schedulable resource (xe or i915)
+  command: /usr/local/bin/k3s kubectl get node -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_allocatable_json
+  until: >
+    (((gpu_allocatable_json.stdout | from_json).items[0].status.allocatable['gpu.intel.com/xe'] | default('0')) != '0') or
+    (((gpu_allocatable_json.stdout | from_json).items[0].status.allocatable['gpu.intel.com/i915'] | default('0')) != '0')
+  retries: 12
+  delay: 5

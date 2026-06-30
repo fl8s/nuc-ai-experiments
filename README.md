@@ -93,6 +93,28 @@ lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
 EOF
 
 pct start 100
+```
+
+## Enter the LXC container and setup SSH, K3s, and other things via Ansible
+
+The provisioning of the host, K3s cluster, and multi-device AI services has been refactored from shell scripts into a set of well-factored Ansible playbooks.
+
+### Ansible Roles Overview
+- **common**: Installs required system packages (openssh-server, sudo, make, git, etc.), enables SSH, creates a non-root user (`smbaker`), and allows passwordless sudo.
+- **k3s**: Disables swap, installs cluster prerequisites (`nfs-common`, `open-iscsi`), creates the necessary `/dev/kmsg` symlink, handles the native K3s installation with specific LXC feature gates (`KubeletInUserNamespace=true`), and configures containerd/nerdctl.
+- **npu**: Installs NFD (Node Feature Discovery), cert-manager, the Intel Device Plugin Operator, and the NPU plugin via Helm. It dynamically patches the Panther Lake NodeFeatureRule to ensure the NPU schedules correctly.
+- **gpu**: Installs the Intel GPU plugin via Helm on top of the existing operator and patches its NodeFeatureRule to properly detect the `xe` and `i915` kernel modules.
+- **npu_monitor**: Clones the Intel NPU monitoring tool to the host and creates a convenience symlink at `/usr/local/bin/npu-monitor`.
+
+### Playbooks
+You can run the entire provisioning suite using `site.yml`, or you can run individual components:
+- `ansible-playbook ansible/playbooks/provision_host.yml`
+- `ansible-playbook ansible/playbooks/provision_cluster.yml`
+- `ansible-playbook ansible/playbooks/provision_services.yml`
+
+### Execution
+
+First, install Ansible, then run the playbooks locally inside the LXC container:
 pct push 100 /root/setup-k3s-npu.sh /root/setup-k3s-npu.sh
 pct push 100 /root/setup-k3s-gpu.sh /root/setup-k3s-gpu.sh
 pct push 100 /root/setup-ssh.sh /root/setup-ssh.sh
@@ -104,6 +126,15 @@ pct push 100 /root/setup-npu-monitor.sh /root/setup-npu-monitor.sh
 ```bash
 pct enter 100
 
+# Install Ansible and passlib (required for user password hashing)
+apt-get update && apt-get install -y ansible git python3-passlib
+
+# Clone the repository (if you haven't already copied it in)
+git clone <this-repo-url> /opt/nuc-experiments
+cd /opt/nuc-experiments
+
+# Run the entire Ansible suite locally
+ansible-playbook ansible/site.yml
 chmod +x /root/*.sh
 /root/setup-ssh.sh
 /root/setup-k3s-npu.sh
@@ -115,6 +146,9 @@ At this point the LXC will have SSH running inside, making it
 convenient to SSH in as well as to SCP in files.
 
 ## Copy project files to the container
+
+Copy the `npu-chatbot` and `npu-imagegen` directories to the LXC container.
+SSH, SCP, or any other method works.
 
 Copy the `npu-chatbot`, `npu-imagegen`, and `code-assistant` directories to the LXC container.
 SSH, SCP, or any other method works.

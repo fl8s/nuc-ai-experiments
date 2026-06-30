@@ -1,0 +1,38 @@
+---
+- name: Ensure /opt/npu-monitor directory exists
+  file:
+    path: /opt/npu-monitor
+    state: directory
+    mode: '0755'
+
+- name: Check if repo is already cloned
+  stat:
+    path: /opt/npu-monitor/.git
+  register: git_repo
+
+- name: Pull updates if repo exists
+  command: git pull
+  args:
+    chdir: /opt/npu-monitor
+  when: git_repo.stat.exists and git_repo.stat.isdir
+
+- name: Clone open-edge-platform/edge-ai-libraries sparse
+  shell: |
+    git clone --depth 1 --filter=blob:none --sparse https://github.com/open-edge-platform/edge-ai-libraries.git /opt/npu-monitor.tmp
+    mv /opt/npu-monitor.tmp/.git /opt/npu-monitor/
+    cd /opt/npu-monitor
+    git sparse-checkout set tools/npu-monitor-tool
+    git checkout
+    rm -rf /opt/npu-monitor.tmp
+  when: not git_repo.stat.exists
+
+- name: Make npu-monitor-tool executable
+  file:
+    path: /opt/npu-monitor/tools/npu-monitor-tool/npu-monitor-tool.py
+    mode: '0755'
+
+- name: Create convenience symlink
+  file:
+    src: /opt/npu-monitor/tools/npu-monitor-tool/npu-monitor-tool.py
+    dest: /usr/local/bin/npu-monitor
+    state: link
